@@ -12,7 +12,7 @@ import copy
 import matplotlib.pyplot as plt
 
 # === CONFIG ===
-STOCKFISH_PATH    = "/usr/games/stockfish"   # Pfad anpassen
+STOCKFISH_PATH    = "/usr/games/stockfish"   # ggf. anpassen
 CHECKPOINT_FILE   = "checkpoint_mixed_neural.pth"
 DEVICE            = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -23,9 +23,11 @@ ELO_STEP_APPROX   = 100    # Anzeige-Elo pro Level
 
 # Unicode-Figuren für GUI
 UNICODE_PIECES = {
-    'P': '♙', 'N': '♘', 'B': '♗', 'R': '♖', 'Q': '♕', 'K': '♔',
-    'p': '♟', 'n': '♞', 'b': '♝', 'r': '♜', 'q': '♛', 'k': '♚',
+    'P': '♙','N': '♘','B': '♗','R': '♖','Q': '♕','K': '♔',
+    'p': '♟','n': '♞','b': '♝','r': '♜','q': '♛','k': '♚',
 }
+
+print(f"🚀 Running on device: {DEVICE}")
 
 # === AlphaZero-Style Input ===
 def board_to_tensor(board):
@@ -38,15 +40,16 @@ def board_to_tensor(board):
 
 # === Replay Buffer ===
 class ReplayBuffer:
-    def __init__(self, capacity=10000): 
+    def __init__(self, capacity=10000):
         self.buf, self.cap = [], capacity
     def push(self, *data):
-        if len(self.buf) >= self.cap: self.buf.pop(0)
+        if len(self.buf) >= self.cap:
+            self.buf.pop(0)
         self.buf.append(data)
-    def sample(self, bs): 
+    def sample(self, bs):
         batch = random.sample(self.buf, bs)
         return zip(*batch)
-    def __len__(self): 
+    def __len__(self):
         return len(self.buf)
 
 # === DQN Model ===
@@ -59,17 +62,17 @@ class DQN(nn.Module):
             nn.ReLU(),
             nn.Linear(1024, 4096)
         )
-    def forward(self, x): 
+    def forward(self, x):
         return self.net(x)
 
 # === Move ↔ Index Helpers ===
-def move_to_index(m): 
+def move_to_index(m):
     return m.from_square * 64 + m.to_square
-def index_to_move(i): 
+def index_to_move(i):
     return chess.Move(i // 64, i % 64)
 
 # === Opponents ===
-def random_opponent(board): 
+def random_opponent(board):
     return random.choice(list(board.legal_moves))
 
 def heuristic_opponent(board):
@@ -79,8 +82,8 @@ def heuristic_opponent(board):
                 chess.ROOK:5, chess.QUEEN:9}.get(pc.piece_type if pc else None, 0)
     legal = list(board.legal_moves)
     max_val = max(value(m) for m in legal)
-    captures = [m for m in legal if value(m)==max_val and max_val>0]
-    return random.choice(captures) if captures else random.choice(legal)
+    caps = [m for m in legal if value(m)==max_val and max_val>0]
+    return random.choice(caps) if caps else random.choice(legal)
 
 def stockfish_opponent(board, engine, depth):
     return engine.play(board, chess.engine.Limit(depth=depth)).move
@@ -91,8 +94,7 @@ def dqn_search(board, model, depth):
         with torch.no_grad():
             qv = model(board_to_tensor(board).unsqueeze(0))[0]
             return qv.max().item(), None
-    best_val = -float('inf')
-    best_move = None
+    best_val, best_move = -float('inf'), None
     for m in board.legal_moves:
         nb = board.copy(stack=False)
         nb.push(m)
@@ -108,12 +110,12 @@ def train(episodes, sf_depth, lookahead):
     level = START_LEVEL
     neural_opponents = []
 
-    # **Checkpoint laden, falls vorhanden**
+    # Checkpoint laden, falls vorhanden
     if os.path.exists(CHECKPOINT_FILE):
-        checkpoint = torch.load(CHECKPOINT_FILE, map_location=DEVICE)
-        model.load_state_dict(checkpoint["model_state"])
-        level = checkpoint.get("level", START_LEVEL)
-        print(f"✅ Checkpoint geladen! Starte Training ab Level {level}")
+        chk = torch.load(CHECKPOINT_FILE, map_location=DEVICE)
+        model.load_state_dict(chk["model_state"])
+        level = chk.get("level", START_LEVEL)
+        print(f"✅ Checkpoint geladen! Weiter ab Level {level}")
 
     opt = optim.Adam(model.parameters(), lr=5e-4)
     loss_fn = nn.MSELoss()
@@ -126,13 +128,15 @@ def train(episodes, sf_depth, lookahead):
     for ep in range(1, episodes+1):
         board = chess.Board()
         loss_ep = 0
+        ply = 0
 
+        # Spiel starten
         while not board.is_game_over():
-            # — KI-Zug mit optionalem Lookahead —
+            ply += 1
+            # -- KI-Zug --
             if lookahead > 0:
                 _, mv = dqn_search(board, model, lookahead)
-                if mv is None:
-                    mv = random.choice(list(board.legal_moves))
+                mv = mv or random.choice(list(board.legal_moves))
             else:
                 s = board_to_tensor(board).unsqueeze(0)
                 with torch.no_grad():
@@ -145,13 +149,14 @@ def train(episodes, sf_depth, lookahead):
                     best = max(idxs, key=lambda i: qv[i].item())
                     mv = index_to_move(best) if index_to_move(best) in legal else random.choice(legal)
 
-            # Promotion prüfen
-            if board.piece_at(mv.from_square).piece_type == chess.PAWN \
-               and chess.square_rank(mv.to_square) in [0,7]:
+            # Promotion
+            if board.piece_at(mv.from_square).piece_type == chess.PAWN and chess.square_rank(mv.to_square) in [0,7]:
                 mv = chess.Move(mv.from_square, mv.to_square, promotion=chess.QUEEN)
             board.push(mv)
+            print(f"Ep{ep} Ply{ply}: KI spielt {mv.uci()}")
 
-            # — Gegner-Zug (Mixed) —
+            # -- Gegner-Zug (Mixed) --
+            ply += 1
             r = random.random()
             if r < 0.3:
                 mv2 = random_opponent(board)
@@ -172,14 +177,13 @@ def train(episodes, sf_depth, lookahead):
                 else:
                     mv2 = random_opponent(board)
 
-            # Promotion beim Gegner
-            if board.piece_at(mv2.from_square).piece_type == chess.PAWN \
-               and chess.square_rank(mv2.to_square) in [0,7]:
+            if board.piece_at(mv2.from_square).piece_type == chess.PAWN and chess.square_rank(mv2.to_square) in [0,7]:
                 mv2 = chess.Move(mv2.from_square, mv2.to_square, promotion=chess.QUEEN)
             if mv2 in board.legal_moves:
                 board.push(mv2)
+                print(f"Ep{ep} Ply{ply}: Gegner spielt {mv2.uci()}")
 
-            # — Reward & Buffer —
+            # -- Reward & Buffer --
             done = board.is_game_over()
             reward = 1.0 if done and board.is_checkmate() else (0.5 if done else 0.0)
             ns = board_to_tensor(board).unsqueeze(0)
@@ -188,7 +192,7 @@ def train(episodes, sf_depth, lookahead):
                 move_to_index(mv), reward, ns.squeeze(), done
             )
 
-            # — DQN-Update —
+            # -- DQN-Update --
             if len(buf) > 200:
                 s_b, a_b, r_b, ns_b, d_b = buf.sample(64)
                 s_b = torch.stack(list(s_b)).to(DEVICE)
@@ -206,12 +210,20 @@ def train(episodes, sf_depth, lookahead):
                 opt.zero_grad(); loss.backward(); opt.step()
                 loss_ep += loss.item()
 
+        # Episode abgeschlossen
         losses.append(loss_ep)
-        if board.result() == "1-0":
+        result = board.result()
+        if result == "1-0":
             wins += 1
-        print(f"Ep{ep}/{episodes} Loss:{loss_ep:.3f} Wins@Lvl:{wins}/{WIN_THRESHOLD} Level:{level}")
+            print(f"✅ Ep{ep}: KI gewinnt! Wins@Lvl:{wins}/{WIN_THRESHOLD} Level:{level}")
+        elif result == "0-1":
+            wins = 0
+            print(f"❌ Ep{ep}: Stockfish gewinnt! Wins reset Level:{level}")
+        else:
+            wins = 0
+            print(f"🤝 Ep{ep}: Remis. Wins reset Level:{level}")
 
-        # — Level-Up —
+        # Level-Up
         if wins >= WIN_THRESHOLD:
             frozen = copy.deepcopy(model).eval().to("cpu")
             neural_opponents.append(frozen)
@@ -220,19 +232,18 @@ def train(episodes, sf_depth, lookahead):
                 level += 1
                 new_elo = 1300 + level * ELO_STEP_APPROX
                 engine.configure({"UCI_Elo": new_elo})
-                print(f"🎉 Level-Up! Gegnerlevel jetzt {level} (~{new_elo} Elo)")
+                print(f"🏆 Level-Up! Neuer Level: {level} (~{new_elo} Elo)")
             else:
                 print(f"🔒 Max Level {MAX_LEVEL} erreicht")
 
-        # — Checkpoint —
+        # Checkpoint speichern
         if ep % 10 == 0:
-            torch.save({
-                "model_state": model.state_dict(),
-                "level": level
-            }, CHECKPOINT_FILE)
+            torch.save({"model_state": model.state_dict(), "level": level}, CHECKPOINT_FILE)
             print(f"💾 Checkpoint bei Ep{ep} gespeichert.")
 
     engine.quit()
+
+    # Plot Loss
     plt.plot(losses)
     plt.title("Training Loss")
     plt.xlabel("Episode")
@@ -244,53 +255,45 @@ def evaluate(games, sf_depth, lookahead):
     if not os.path.exists(CHECKPOINT_FILE):
         print("Kein Checkpoint – erst trainieren!")
         return
-    data = torch.load(CHECKPOINT_FILE, map_location=DEVICE)
+    chk = torch.load(CHECKPOINT_FILE, map_location=DEVICE)
     model = DQN().to(DEVICE)
-    model.load_state_dict(data["model_state"])
+    model.load_state_dict(chk["model_state"])
     model.eval()
 
     engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
-    engine.configure({"UCI_LimitStrength":True,
-                      "UCI_Elo":1300+MAX_LEVEL*ELO_STEP_APPROX})
+    engine.configure({"UCI_LimitStrength":True, "UCI_Elo":1300+MAX_LEVEL*ELO_STEP_APPROX})
 
     results = {"win":0,"draw":0,"loss":0}
     for i in range(1, games+1):
         board = chess.Board()
         while not board.is_game_over():
-            # Model-Zug mit Lookahead/Fallback
             if lookahead > 0:
                 _, mv = dqn_search(board, model, lookahead)
-                if mv is None: mv = random.choice(list(board.legal_moves))
+                mv = mv or random.choice(list(board.legal_moves))
             else:
                 s = board_to_tensor(board).unsqueeze(0)
-                with torch.no_grad(): qv = model(s)[0]
+                with torch.no_grad():
+                    qv = model(s)[0]
                 legal = list(board.legal_moves)
                 idxs = [move_to_index(m) for m in legal]
                 best = max(idxs, key=lambda x: qv[x].item())
                 mv = index_to_move(best) if index_to_move(best) in legal else random.choice(legal)
 
-            # Promotion
-            if board.piece_at(mv.from_square).piece_type == chess.PAWN \
-               and chess.square_rank(mv.to_square) in [0,7]:
+            if board.piece_at(mv.from_square).piece_type == chess.PAWN and chess.square_rank(mv.to_square) in [0,7]:
                 mv = chess.Move(mv.from_square, mv.to_square, promotion=chess.QUEEN)
             board.push(mv)
 
-            # Stockfish-Zug
             res = engine.play(board, chess.engine.Limit(depth=sf_depth))
             mv2 = res.move
-            if board.piece_at(mv2.from_square).piece_type == chess.PAWN \
-               and chess.square_rank(mv2.to_square) in [0,7]:
+            if board.piece_at(mv2.from_square).piece_type == chess.PAWN and chess.square_rank(mv2.to_square) in [0,7]:
                 mv2 = chess.Move(mv2.from_square, mv2.to_square, promotion=chess.QUEEN)
             if mv2 in board.legal_moves:
                 board.push(mv2)
 
         r = board.result()
-        if r == "1-0":
-            results["win"] += 1
-        elif r == "1/2-1/2":
-            results["draw"] += 1
-        else:
-            results["loss"] += 1
+        if r == "1-0":   results["win"]  += 1
+        elif r == "1/2-1/2": results["draw"] += 1
+        else:            results["loss"] += 1
         print(f"Eval {i}/{games}: {r}")
 
     engine.quit()
@@ -301,9 +304,9 @@ def play_gui(sf_depth, lookahead):
     if not os.path.exists(CHECKPOINT_FILE):
         print("Kein Checkpoint – erst trainieren!")
         return
-    data = torch.load(CHECKPOINT_FILE, map_location=DEVICE)
+    chk = torch.load(CHECKPOINT_FILE, map_location=DEVICE)
     model = DQN().to(DEVICE)
-    model.load_state_dict(data["model_state"])
+    model.load_state_dict(chk["model_state"])
     model.eval()
 
     board = chess.Board()
@@ -333,9 +336,7 @@ def play_gui(sf_depth, lookahead):
                 selected = sq
         else:
             mv = chess.Move(selected, sq)
-            # Promotion?
-            if board.piece_at(selected).piece_type == chess.PAWN \
-               and chess.square_rank(sq) in [0,7]:
+            if board.piece_at(selected).piece_type == chess.PAWN and chess.square_rank(sq) in [0,7]:
                 mv = chess.Move(selected, sq, promotion=chess.QUEEN)
             if mv in board.legal_moves:
                 board.push(mv)
@@ -347,17 +348,16 @@ def play_gui(sf_depth, lookahead):
     def ai_move():
         if lookahead > 0:
             _, mv = dqn_search(board, model, lookahead)
-            if mv is None:
-                mv = random.choice(list(board.legal_moves))
+            mv = mv or random.choice(list(board.legal_moves))
         else:
             s = board_to_tensor(board).unsqueeze(0)
-            with torch.no_grad(): qv = model(s)[0]
+            with torch.no_grad():
+                qv = model(s)[0]
             legal = list(board.legal_moves)
             idxs = [move_to_index(m) for m in legal]
             best = max(idxs, key=lambda x: qv[x].item())
             mv = index_to_move(best) if index_to_move(best) in legal else random.choice(legal)
-        if board.piece_at(mv.from_square).piece_type == chess.PAWN \
-           and chess.square_rank(mv.to_square) in [0,7]:
+        if board.piece_at(mv.from_square).piece_type == chess.PAWN and chess.square_rank(mv.to_square) in [0,7]:
             mv = chess.Move(mv.from_square, mv.to_square, promotion=chess.QUEEN)
         board.push(mv)
         draw_board()
@@ -390,3 +390,4 @@ if __name__ == "__main__":
         play_gui(depth, lookahead)
     else:
         print("Ungültiger Modus. Eingabe: train / eval / play")
+

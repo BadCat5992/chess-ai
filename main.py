@@ -105,14 +105,23 @@ def dqn_search(board, model, depth):
 # === Mixed-Opponent Training ===
 def train(episodes, sf_depth, lookahead):
     model = DQN().to(DEVICE)
+    level = START_LEVEL
+    neural_opponents = []
+
+    # **Checkpoint laden, falls vorhanden**
+    if os.path.exists(CHECKPOINT_FILE):
+        checkpoint = torch.load(CHECKPOINT_FILE, map_location=DEVICE)
+        model.load_state_dict(checkpoint["model_state"])
+        level = checkpoint.get("level", START_LEVEL)
+        print(f"✅ Checkpoint geladen! Starte Training ab Level {level}")
+
     opt = optim.Adam(model.parameters(), lr=5e-4)
     loss_fn = nn.MSELoss()
     buf = ReplayBuffer()
-    losses, wins, level = [], 0, START_LEVEL
-    neural_opponents = []
+    losses, wins = [], 0
 
     engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
-    engine.configure({"UCI_LimitStrength":True, "UCI_Elo":1300+level*ELO_STEP_APPROX})
+    engine.configure({"UCI_LimitStrength":True, "UCI_Elo":1300 + level * ELO_STEP_APPROX})
 
     for ep in range(1, episodes+1):
         board = chess.Board()
@@ -122,7 +131,7 @@ def train(episodes, sf_depth, lookahead):
             # — KI-Zug mit optionalem Lookahead —
             if lookahead > 0:
                 _, mv = dqn_search(board, model, lookahead)
-                if mv is None:  # Fallback
+                if mv is None:
                     mv = random.choice(list(board.legal_moves))
             else:
                 s = board_to_tensor(board).unsqueeze(0)
@@ -162,6 +171,7 @@ def train(episodes, sf_depth, lookahead):
                     mv2 = index_to_move(best2) if index_to_move(best2) in legal2 else random.choice(legal2)
                 else:
                     mv2 = random_opponent(board)
+
             # Promotion beim Gegner
             if board.piece_at(mv2.from_square).piece_type == chess.PAWN \
                and chess.square_rank(mv2.to_square) in [0,7]:
@@ -171,16 +181,12 @@ def train(episodes, sf_depth, lookahead):
 
             # — Reward & Buffer —
             done = board.is_game_over()
-            if done and board.is_checkmate():
-                reward = 1.0
-            elif done:
-                reward = 0.5
-            else:
-                reward = 0.0
-
+            reward = 1.0 if done and board.is_checkmate() else (0.5 if done else 0.0)
             ns = board_to_tensor(board).unsqueeze(0)
-            buf.push(s.squeeze() if lookahead==0 else board_to_tensor(board).squeeze(),
-                     move_to_index(mv), reward, ns.squeeze(), done)
+            buf.push(
+                s.squeeze() if lookahead==0 else board_to_tensor(board).squeeze(),
+                move_to_index(mv), reward, ns.squeeze(), done
+            )
 
             # — DQN-Update —
             if len(buf) > 200:
@@ -339,7 +345,6 @@ def play_gui(sf_depth, lookahead):
         draw_board()
 
     def ai_move():
-        # KI-Zug mit Lookahead
         if lookahead > 0:
             _, mv = dqn_search(board, model, lookahead)
             if mv is None:
@@ -351,7 +356,6 @@ def play_gui(sf_depth, lookahead):
             idxs = [move_to_index(m) for m in legal]
             best = max(idxs, key=lambda x: qv[x].item())
             mv = index_to_move(best) if index_to_move(best) in legal else random.choice(legal)
-        # Promotion
         if board.piece_at(mv.from_square).piece_type == chess.PAWN \
            and chess.square_rank(mv.to_square) in [0,7]:
             mv = chess.Move(mv.from_square, mv.to_square, promotion=chess.QUEEN)
@@ -386,4 +390,3 @@ if __name__ == "__main__":
         play_gui(depth, lookahead)
     else:
         print("Ungültiger Modus. Eingabe: train / eval / play")
-

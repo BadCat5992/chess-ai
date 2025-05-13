@@ -105,17 +105,19 @@ def dqn_search(board, model, depth):
     return best_val, best_move
 
 # === Mixed-Opponent Training ===
-def train(episodes, sf_depth, lookahead):
+def train(total_episodes, sf_depth, lookahead):
     model = DQN().to(DEVICE)
     level = START_LEVEL
     neural_opponents = []
 
     # Checkpoint laden, falls vorhanden
+    start_ep = 1
     if os.path.exists(CHECKPOINT_FILE):
         chk = torch.load(CHECKPOINT_FILE, map_location=DEVICE)
         model.load_state_dict(chk["model_state"])
         level = chk.get("level", START_LEVEL)
-        print(f"✅ Checkpoint geladen! Weiter ab Level {level}")
+        start_ep = chk.get("epoch", 1) + 1
+        print(f"✅ Checkpoint geladen! Weiter ab Epoche {start_ep}, Level {level}")
 
     opt = optim.Adam(model.parameters(), lr=5e-4)
     loss_fn = nn.MSELoss()
@@ -125,7 +127,7 @@ def train(episodes, sf_depth, lookahead):
     engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
     engine.configure({"UCI_LimitStrength":True, "UCI_Elo":1300 + level * ELO_STEP_APPROX})
 
-    for ep in range(1, episodes+1):
+    for ep in range(start_ep, total_episodes + 1):
         board = chess.Board()
         loss_ep = 0
         ply = 0
@@ -238,7 +240,7 @@ def train(episodes, sf_depth, lookahead):
 
         # Checkpoint speichern
         if ep % 10 == 0:
-            torch.save({"model_state": model.state_dict(), "level": level}, CHECKPOINT_FILE)
+            torch.save({"model_state": model.state_dict(), "level": level, "epoch": ep}, CHECKPOINT_FILE)
             print(f"💾 Checkpoint bei Ep{ep} gespeichert.")
 
     engine.quit()
@@ -250,7 +252,7 @@ def train(episodes, sf_depth, lookahead):
     plt.ylabel("Loss")
     plt.show()
 
-# === Eval gegen festen Level 4 (~1700 Elo) ===
+# === Eval gegen festen Level 4 (~1700 Elo) === (~1700 Elo) ===
 def evaluate(games, sf_depth, lookahead):
     if not os.path.exists(CHECKPOINT_FILE):
         print("Kein Checkpoint – erst trainieren!")

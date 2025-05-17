@@ -4,6 +4,7 @@ import chess
 import torch
 import numpy as np
 import random
+import torch.nn as nn
 
 # === CONFIG ===
 CHECKPOINT_FILE = "checkpoint_mixed_neural.pth"
@@ -17,7 +18,6 @@ except ValueError:
     print("Ungültige Eingabe, Lookahead auf 0 gesetzt.")
 
 # === DQN Model Definition (muss zum trainierten Modell passen) ===
-import torch.nn as nn
 class DQN(nn.Module):
     def __init__(self):
         super().__init__()
@@ -42,17 +42,6 @@ def board_to_tensor(board):
 
 def move_to_index(m):
     return m.from_square * 64 + m.to_square
-
-def piece_value(pc):
-    return {
-        None: 0.0,
-        chess.PAWN: 0.2,
-        chess.KNIGHT: 0.3,
-        chess.BISHOP: 0.3,
-        chess.ROOK: 0.5,
-        chess.QUEEN: 0.75,
-        chess.KING: 0.0
-    }.get(pc.piece_type if pc else None, 0.0)
 
 # === DQN Search für Lookahead ===
 def dqn_search(board, model, depth):
@@ -127,7 +116,8 @@ class ChessGUI(tk.Frame):
         else:
             move = chess.Move(self.selected_sq, sq)
             pc = self.board.piece_at(self.selected_sq)
-            if pc and pc.piece_type == chess.PAWN and (chess.square_rank(sq) in [0,7]):
+            # Pawn-Promotion
+            if pc and pc.piece_type == chess.PAWN and chess.square_rank(sq) in [0,7]:
                 move = chess.Move(self.selected_sq, sq, promotion=chess.QUEEN)
             if move in self.board.legal_moves:
                 self.board.push(move)
@@ -136,15 +126,35 @@ class ChessGUI(tk.Frame):
                 if self.board.is_game_over():
                     messagebox.showinfo("Game Over", f"Result: {self.board.result()}")
                 else:
+                    # Rechner-Antwort nach 100ms
                     self.after(100, self.ai_move)
             else:
                 self.selected_sq = None
         self.draw_board()
 
     def ai_move(self):
-        _, mv = dqn_search(self.board, model, LOOKAHEAD)
+        # Lookahead-Search oder direkt Q-Max
+        if LOOKAHEAD > 0:
+            _, mv = dqn_search(self.board, model, LOOKAHEAD)
+        else:
+            with torch.no_grad():
+                qv = model(board_to_tensor(self.board).unsqueeze(0))[0]
+            legal = list(self.board.legal_moves)
+            # kleine Epsilon-Greedy-Action, damit es nicht immer gleich spielt
+            if random.random() < 0.1:
+                mv = random.choice(legal)
+            else:
+                idxs = [move_to_index(m) for m in legal]
+                best_q, best_mv = -float('inf'), None
+                for i, m in zip(idxs, legal):
+                    if qv[i].item() > best_q:
+                        best_q, best_mv = qv[i].item(), m
+                mv = best_mv or random.choice(legal)
+
+        # falls mal kein Move zurückkommt
         if mv is None:
             mv = random.choice(list(self.board.legal_moves))
+
         self.board.push(mv)
         self.draw_board()
         if self.board.is_game_over():
@@ -155,4 +165,3 @@ if __name__ == '__main__':
     root.title("Play gegen DQN-KI")
     ChessGUI(root)
     root.mainloop()
-

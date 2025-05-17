@@ -9,12 +9,12 @@ import os
 
 # === CONFIG ===
 CHECKPOINT_FILE = "checkpoint_mixed_neural.pth"
-STOCKFISH_PATH = "/usr/games/stockfish"    # Pfad zu deiner Stockfish-Binary
+STOCKFISH_PATH = "/usr/games/stockfish"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 START_LEVEL = 1
-MAX_LEVEL = 3      # Stockfish max Skill Level
-WIN_THRESHOLD = 10   # Wins bis Level-Up beim SF-Gegner
+MAX_LEVEL = 3
+WIN_THRESHOLD = 10
 
 print(f"🚀 Running on device: {DEVICE}")
 
@@ -86,16 +86,12 @@ def dqn_search(board, model, depth):
 
 # === TRAINING ===
 def train(total_episodes, sf_depth, lookahead):
-    # Engine starten
     engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
     sf_level = START_LEVEL
     engine.configure({"Skill Level": sf_level})
     sf_wins = 0
 
     model = DQN().to(DEVICE)
-    level = 1  # eigenes Level bleibt, kann optional genutzt werden
-
-    # Checkpoint laden
     start_ep = 1
     if os.path.exists(CHECKPOINT_FILE):
         try:
@@ -108,7 +104,7 @@ def train(total_episodes, sf_depth, lookahead):
 
     opt = optim.Adam(model.parameters(), lr=5e-4)
     loss_fn = nn.MSELoss()
-    buf, wins, losses_count = ReplayBuffer(), 0, 0
+    buf, losses_count = ReplayBuffer(), 0
 
     for ep in range(start_ep, total_episodes + 1):
         board, loss_ep, ply = chess.Board(), 0, 0
@@ -130,13 +126,13 @@ def train(total_episodes, sf_depth, lookahead):
                     mv = random.choice(legal)
                 else:
                     idxs = [move_to_index(m) for m in legal]
-                    best_q = -float('inf'); best_mv = None
+                    best_q, best_mv = -float('inf'), None
                     for i, move in zip(idxs, legal):
                         if qv[i].item() > best_q:
-                            best_q = qv[i].item(); best_mv = move
+                            best_q, best_mv = qv[i].item(), move
                     mv = best_mv or random.choice(legal)
 
-            # Pawn-Promo-Flag
+            # Promotion-Handling
             if board.piece_at(mv.from_square) and board.piece_at(mv.from_square).piece_type == chess.PAWN \
                and chess.square_rank(mv.to_square) in [0, 7]:
                 mv = chess.Move(mv.from_square, mv.to_square, promotion=chess.QUEEN)
@@ -147,7 +143,7 @@ def train(total_episodes, sf_depth, lookahead):
             print(f"🤖 KI-Zug {ply}: {board.san(mv)}")
             board.push(mv)
 
-            # === Event-Reward ===
+            # === Event-Reward KI ===
             total_reward = 0.0
             if board.is_checkmate(): total_reward += 1000
             elif board.is_check(): total_reward += 100
@@ -155,29 +151,50 @@ def train(total_episodes, sf_depth, lookahead):
             if promotion: total_reward += 50
             if cap_pc: total_reward += piece_value(cap_pc) * 100
 
-            # Gegner-Zug via Stockfish
-            if board.is_game_over(): break
-            ply += 1
-            sf_move = engine.play(board, chess.engine.Limit(depth=sf_depth)).move
-
-            prev_pc = board.piece_at(sf_move.to_square)
-            loss_penalty = 0.0
-            if prev_pc and prev_pc.piece_type == chess.QUEEN: loss_penalty -= 50
-            if prev_pc: loss_penalty -= piece_value(prev_pc) * 100
-
-            print(f"🧠 SF-Zug {ply}: {board.san(sf_move)}")
-            board.push(sf_move)
-
+            # Push KI-Transition
             done = board.is_game_over()
             buf.push(
                 s.squeeze(),
                 move_to_index(mv),
-                total_reward + loss_penalty,
+                total_reward,
                 board_to_tensor(board).squeeze(),
                 done
             )
+            if done:
+                break
 
-            # Training Step
+            # === Stockfish-Zug mit Imitation Learning ===
+            # Zustand direkt vor SF
+            s_sf = board_to_tensor(board).squeeze().clone()
+            sf_color = board.turn
+
+            # Eval vor SF
+            info_before = engine.analyse(board, chess.engine.Limit(depth=sf_depth))
+            score_before = info_before["score"].pov(sf_color).score(mate_score=100000)
+
+            ply += 1
+            sf_move = engine.play(board, chess.engine.Limit(depth=sf_depth)).move
+            print(f"🧠 SF-Zug {ply}: {board.san(sf_move)}")
+            board.push(sf_move)
+
+            # Eval nach SF
+            info_after = engine.analyse(board, chess.engine.Limit(depth=sf_depth))
+            score_after = info_after["score"].pov(sf_color).score(mate_score=100000)
+
+            # Centipawn-Gewinn
+            reward_sf = float(score_after - score_before)
+
+            # Push SF-Transition (Imitation)
+            done_sf = board.is_game_over()
+            buf.push(
+                s_sf,
+                move_to_index(sf_move),
+                reward_sf,
+                board_to_tensor(board).squeeze(),
+                done_sf
+            )
+
+            # === Training Step ===
             if len(buf) > 32:
                 b_s, b_a, b_r, b_ns, b_d = buf.sample(32)
                 b_s = torch.stack(b_s).to(DEVICE)
@@ -202,8 +219,7 @@ def train(total_episodes, sf_depth, lookahead):
             sf_wins += 1
             print(f"✅ KI schlägt Stockfish L{sf_level} ({sf_wins}/{WIN_THRESHOLD})")
             if sf_wins >= WIN_THRESHOLD and sf_level < MAX_LEVEL:
-                sf_level += 1
-                sf_wins = 0
+                sf_level += 1; sf_wins = 0
                 engine.configure({"Skill Level": sf_level})
                 print(f"🔥 Stockfish-Level-Up! Jetzt L{sf_level}")
         else:
@@ -214,10 +230,7 @@ def train(total_episodes, sf_depth, lookahead):
         print(f"🔢 Episode {ep} abgeschlossen. Stats: SF-Wins@L{sf_level}={sf_wins}, Total Losses={losses_count}")
 
         # Checkpoint speichern
-        torch.save({
-            "model_state": model.state_dict(),
-            "epoch": ep,
-        }, CHECKPOINT_FILE)
+        torch.save({"model_state": model.state_dict(), "epoch": ep}, CHECKPOINT_FILE)
 
     engine.close()
 
@@ -230,4 +243,3 @@ if __name__ == "__main__":
         train(eps, depth, lookahead)
     else:
         print("Eval-Modus noch nicht implementiert")
-
